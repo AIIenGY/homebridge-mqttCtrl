@@ -16,7 +16,7 @@ const SENSOR_OBJ_TYPE = "sensor";
 const THERMOSTAT_OBJ_TYPE = "thermostat"
 
 var is_supported_type = function(v) {
-    return v === SCENE_OBJ_TYPE || v === DEVICE_OBJ_TYPE || v === SENSOR_OBJ_TYPE || v === THERMOSTAT_OBJ_TYPE;
+    return /*v === SCENE_OBJ_TYPE ||*/ v === DEVICE_OBJ_TYPE || v === SENSOR_OBJ_TYPE || v === THERMOSTAT_OBJ_TYPE;
 }
 
 module.exports = function(homebridge) {
@@ -41,7 +41,7 @@ function mqttCtrlPlatform(log, config, api) {
     var platform = this;
     this.log = log;
     this.config = config;
-    this.objects = this.config.objects || [];
+
     this.accessories = [];
     this.devAccessoryArray = [];
 
@@ -64,8 +64,6 @@ function mqttCtrlPlatform(log, config, api) {
         password: config["MQTT_pwd"],
         rejectUnauthorized: false
     };
-    this.topicSub    = config["gwID"]+"/response/+";
-    this.topicPub    = config["gwID"]+"/request/" + this.options.clientId;
 
     // connect to MQTT broker
     this.client = mqtt.connect(this.url, this.options);
@@ -76,17 +74,22 @@ function mqttCtrlPlatform(log, config, api) {
 
     this.client.on('connect', function () {
         that.log('MQTT connected, client id:' + that.options.clientId);
-        that.client.subscribe(that.topicSub);
+                
         that.mqttConected = true;
+        
+        for (var i = 0; i < that.config.gateways.length; i++) {
+            var topicSub = that.config.gateways[i]["gwID"]+"/response/+";;
+            that.log('MQTT subscribe topic:' + topicSub);
+            that.client.subscribe(topicSub);
+        }
 
         if (that.mqttMsgArray.length != 0) {
-          for (var i = 0; i < that.mqttMsgArray.length; i++) {
-            var mqttMsg;
-            mqttMsg = that.mqttMsgArray[i];
-            that.log("mqttPub function:"+mqttMsg);
-
-            that.client.publish(that.topicPub, mqttMsg, that.publish_options);
-          }
+            for (var i = 0; i < that.mqttMsgArray.length; i++) {
+                var mqttMsg = that.mqttMsgArray[i];
+                var topic = mqttMsg.gwID + "/request/" + that.options.clientId;
+                that.log("mqttPub topic:" + topic + ", msg:" + mqttMsg.msg);
+                that.client.publish(topic, mqttMsg.msg, that.publish_options);
+            }
         }
     })
 
@@ -156,14 +159,24 @@ function mqttCtrlPlatform(log, config, api) {
         // Or start discover new accessories
         this.api.on('didFinishLaunching', function() {
             platform.log("Loading cached accessory complete");
+            
+            for (var i = 0; i < that.config.gateways.length; i++) {              
+                var gwID = that.config.gateways[i]["gwID"];
+                var objects = that.config.gateways[i]["objects"];
+                var mqttMsg = {
+                    gwID:gwID,
+                    msg:'{"message":"list device"}'
+                };
+                
+                for (var j = 0; j < that.config.gateways[i].objects.length; j++){
+                    var object = that.config.gateways[i].objects[j];
+                    object["gwID"] = gwID;
+                    this.addObject(object);
+                }
 
-            for ( var i in this.objects ) {
-                this.addObject(this.objects[i]);
+                that.mqttPub(this, mqttMsg);
             }
         }.bind(this));
-
-        var mqttMsg = '{"message":"list device"}';
-        this.mqttPub(this, mqttMsg);
     }
 }
 
@@ -172,7 +185,7 @@ mqttCtrlPlatform.prototype.addObject = function(object) {
     var platform = this;
     var uuid;
 
-    platform.log("object type:" +object.type+", name:"+object.name+", id:"+object.id);
+    platform.log("gatewayID:"+object.gwID+", object type:" +object.type+", name:"+object.name+", id:"+object.id);
 
     if(!is_supported_type(object.type))
     {
@@ -211,11 +224,6 @@ mqttCtrlPlatform.prototype.configureAccessory = function(accessory) {
     var platform = this;
     var object = accessory.context;
 
-    if(platform.config.overrideCache === "true") {
-        var newContext = platform.objects.find( p => p.name === accessory.context.name );
-        accessory.context = newContext;
-    }
-
     switch(object.type)
     {
         case SCENE_OBJ_TYPE:
@@ -226,7 +234,7 @@ mqttCtrlPlatform.prototype.configureAccessory = function(accessory) {
                 }
 
                 var sceneAccessory = new SceneAccessory(platform, accessory);
-		platform.devAccessoryArray.push(sensorAccessory);
+                platform.devAccessoryArray.push(sensorAccessory);
 
                 accessory.getService(Service.Switch)
                   .getCharacteristic(Characteristic.On)
@@ -249,7 +257,10 @@ mqttCtrlPlatform.prototype.configureAccessory = function(accessory) {
                   .on('get', deviceAccessory.getStatus.bind(deviceAccessory))
                   .on('set', deviceAccessory.setStatus.bind(deviceAccessory));
 
-                var reqStatusMsg = '{"message":"request status","device":{"address":"' + object.id + '"}}';
+                var reqStatusMsg = {
+                    gwID:object["gwID"],
+                    msg:'{"message":"request status","device":{"address":"' + object.id + '"}}'
+                };
                 this.mqttPub(this, reqStatusMsg);
             }
             break;
@@ -318,7 +329,10 @@ mqttCtrlPlatform.prototype.configureAccessory = function(accessory) {
                   .getCharacteristic(Characteristic.StatusLowBattery)
                   .on('get', sensorAccessory.getStatusLowBattery.bind(sensorAccessory));
 
-                var reqStatusMsg = '{"message":"request status","device":{"address":"' + object.id + '"}}';
+                var reqStatusMsg = {
+                    gwID:object["gwID"],
+                    msg:'{"message":"request status","device":{"address":"' + object.id + '"}}'
+                };
                 this.mqttPub(this, reqStatusMsg);
             }
             break;
@@ -364,7 +378,10 @@ mqttCtrlPlatform.prototype.configureAccessory = function(accessory) {
                   .getCharacteristic(Characteristic.CurrentHeatingCoolingState)
                   .on('get', thermostatAccessory.getCurrentHeatingCoolingState.bind(thermostatAccessory));
 
-              var reqStatusMsg = '{"message":"request status","device":{"address":"' + object.id + '"}}';
+              var reqStatusMsg = {
+                  gwID:object["gwID"],
+                  msg:'{"message":"request status","device":{"address":"' + object.id + '"}}'
+              };
               this.mqttPub(this, reqStatusMsg);
 
             }
@@ -411,8 +428,10 @@ mqttCtrlPlatform.prototype.mqttPub = function(platform, message) {
     if (platform.mqttConected === false) {
         platform.mqttMsgArray.push(message);
     }else {
-        this.log("mqttPub function:"+message);
+        var topic = message.gwID + "/request/" + platform.options.clientId;
+        
+        this.log("mqttPub topic:" + topic + ", message: " + message.msg);
 
-        platform.client.publish(platform.topicPub, message, platform.publish_options);
+        platform.client.publish(topic, message.msg, platform.publish_options);
   }
 };
